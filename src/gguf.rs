@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek};
 use std::collections::HashMap;
 use anyhow::{Result, bail};
 use byteorder::{LittleEndian, ReadBytesExt};

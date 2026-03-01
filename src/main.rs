@@ -83,11 +83,17 @@ fn is_eos(token_id: u32, eos_tokens: &[u32]) -> bool {
     eos_tokens.contains(&token_id)
 }
 
+const COLOR_RESET: &str = "\x1b[0m";
+const COLOR_BOLD: &str = "\x1b[1m";
+const COLOR_CYAN: &str = "\x1b[36m";
+const COLOR_GRAY: &str = "\x1b[90m";
+const COLOR_PURPLE: &str = "\x1b[35m";
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mut model_path = "../llama.cpp/models/smollm2-1.7b-instruct-q4_k_m.gguf".to_string();
     let mut prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello!<|im_end|>\n<|im_start|>assistant\n".to_string();
-    let mut max_tokens: usize = 50;
+    let mut max_tokens: usize = 2048; // Higher default
     let mut interactive = false;
     let mut temperature: f32 = 0.0;
     let mut top_k: usize = 40;
@@ -102,7 +108,8 @@ fn main() -> Result<()> {
             prompt = args[i+1].clone();
             i += 2;
         } else if args[i] == "-n" && i + 1 < args.len() {
-            max_tokens = args[i+1].parse().unwrap_or(50);
+            max_tokens = args[i+1].parse().unwrap_or(2048);
+            if max_tokens == 0 { max_tokens = usize::MAX; } // Uncapped
             i += 2;
         } else if args[i] == "-t" && i + 1 < args.len() {
             temperature = args[i+1].parse().unwrap_or(0.0);
@@ -124,43 +131,65 @@ fn main() -> Result<()> {
         }
     }
 
-    println!("=== Omni-Core AMD Inference Engine ===");
-    println!("Model: {}", model_path);
-    println!();
-
-    hip::init_gpu()?;
-
-    let t_load = Instant::now();
+    // --- Silent Initialization ---
+    hip::init_gpu().ok(); 
     let mut graph = graph::LlamaGraph::new()?;
     let ctx = gguf::GgufContext::load(&model_path)?;
     graph.load_weights(&ctx)?;
-    println!("Model loaded in {:.2}s\n", t_load.elapsed().as_secs_f64());
-
     let tok = tokenizer::Tokenizer::from_gguf(&ctx)?;
-    println!("Prompt: \"{}\"", prompt);
 
-    println!("\n--- Generation ---");
-    print!("{}", prompt);
+    // Warm-up triggers any internal library logging (like ggml_cuda_init)
+    let _ = graph.forward(0, 0); 
+    
+    // --- Elegant UI Display ---
+    // Clear screen and reset cursor to top left to hide all previous init logs
+    print!("\x1b[2J\x1b[H"); 
+    println!("{}{}● Omni-Core AMD GPU Engine{}", COLOR_BOLD, COLOR_CYAN, COLOR_RESET);
+    println!();
+
+    if !interactive {
+        println!("{}Prompt:{} {}", COLOR_BOLD, COLOR_RESET, prompt);
+    }
+
+    print!("{}{}Assistant:{} ", COLOR_BOLD, COLOR_PURPLE, COLOR_RESET);
+    std::io::Write::flush(&mut std::io::stdout()).ok();
     std::io::Write::flush(&mut std::io::stdout()).ok();
 
     let eos_ids: Vec<u32> = match ctx.metadata.get("tokenizer.ggml.eos_token_id") {
         Some(gguf::GgufValue::Uint32(v)) => vec![*v],
-        _ => vec![2, 151643, 151645], // fallback for llama and qwen
+        _ => vec![2, 151643, 151645], 
     };
 
     let mut all_tokens: Vec<u32> = tok.encode(&prompt);
-    let mut total_gen_tokens = 0usize;
     let mut pos = 0;
+    let mut total_gen_tokens = 0;
+    let mut start_gen = Instant::now();
 
     loop {
-        // 1. Prefill / Process any pending tokens
-        let mut last_logits = Vec::new();
-        while pos < all_tokens.len() {
-            last_logits = graph.forward(all_tokens[pos], pos)?;
-            pos += 1;
+        // OPTIMIZATION: Process initial prompt tokens in batch for faster prefill
+        let prefill_start = Instant::now();
+        let last_logits = if pos < all_tokens.len() {
+            let batch_tokens = &all_tokens[pos..];
+            let logits = graph.forward_batch(batch_tokens, pos)?;
+            pos = all_tokens.len();
+            logits
+        } else {
+            Vec::new()
+        };
+        let prefill_time = prefill_start.elapsed().as_secs_f64();
+        
+        if !last_logits.is_empty() && prefill_time > 0.01 {
+            // Show prefill performance for initial prompt
+            let prefill_tokens = all_tokens.len();
+            eprintln!("{}[Prefill: {} tokens in {:.3}s = {:.1} tok/s]{}", 
+                COLOR_GRAY, prefill_tokens, prefill_time, 
+                prefill_tokens as f64 / prefill_time, COLOR_RESET);
         }
+        
+        start_gen = Instant::now();
+        total_gen_tokens = 0;
+        let mut last_logits = last_logits;
 
-        // 2. Decode
         for _ in 0..max_tokens {
             let next_token = sample(&last_logits, temperature, top_k, top_p);
             if is_eos(next_token, &eos_ids) {
@@ -176,9 +205,18 @@ fn main() -> Result<()> {
             total_gen_tokens += 1;
         }
 
+        let elapsed = start_gen.elapsed().as_secs_f64();
+        if total_gen_tokens > 0 {
+            println!("\n{}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{}", COLOR_GRAY, COLOR_RESET);
+            println!("{}Performance:{} {:.2} tokens/sec ({} tokens in {:.2}s)", 
+                COLOR_BOLD, COLOR_RESET, 
+                total_gen_tokens as f64 / elapsed,
+                total_gen_tokens, elapsed);
+        }
+
         if interactive {
-            println!();
-            print!("> ");
+            println!("\n");
+            print!("{}{}User:{} ", COLOR_BOLD, COLOR_CYAN, COLOR_RESET);
             std::io::Write::flush(&mut std::io::stdout()).ok();
             
             let mut line = String::new();
@@ -196,11 +234,15 @@ fn main() -> Result<()> {
             let user_msg = format!("<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n", line);
             let new_tokens = tok.encode(&user_msg);
             all_tokens.extend(&new_tokens);
+            
+            println!();
+            print!("{}{}Assistant:{} ", COLOR_BOLD, COLOR_PURPLE, COLOR_RESET);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
         } else {
+            println!();
             break;
         }
     }
 
-    println!("\n\n--- Done ---");
     Ok(())
 }

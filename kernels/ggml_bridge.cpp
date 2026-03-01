@@ -313,11 +313,12 @@ extern "C" {
 void bridge_quantize_q8_1(
     const float * x,
     void * vy,
+    int type_w,
     int64_t ne0,
     hipStream_t stream)
 {
     quantize_row_q8_1_cuda(
-        x, nullptr, vy, GGML_TYPE_Q4_K,
+        x, nullptr, vy, (ggml_type)type_w,
         ne0, ne0, ne0, ne0, ne0, 1, 1, 1, stream
     );
 }
@@ -344,6 +345,33 @@ void bridge_mul_mat_vec_q(
         ncols_x, nrows_x, 1, stride_row_x, stride_col_y, nrows_x,
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, stream
     );
+}
+
+// Float32 matrix-vector multiply (CPU fallback or simple GPU kernel)
+__global__ void kernel_mul_mat_vec_f32(const float * x, const float * y, float * dst, int ncols, int nrows) {
+    int row = blockIdx.x;
+    if (row < nrows) {
+        float sum = 0;
+        for (int i = threadIdx.x; i < ncols; i += blockDim.x) {
+            sum += x[row * ncols + i] * y[i];
+        }
+        // warp reduction
+        for (int offset = warpSize/2; offset > 0; offset >>= 1) sum += __shfl_xor(sum, offset);
+        static __shared__ float shared[32];
+        int lane = threadIdx.x % warpSize;
+        int warp_id = threadIdx.x / warpSize;
+        if (lane == 0) shared[warp_id] = sum;
+        __syncthreads();
+        if (warp_id == 0) {
+            sum = (lane < (blockDim.x + warpSize - 1) / warpSize) ? shared[lane] : 0;
+            for (int offset = warpSize/2; offset > 0; offset >>= 1) sum += __shfl_xor(sum, offset);
+            if (lane == 0) dst[row] = sum;
+        }
+    }
+}
+
+void bridge_mul_mat_vec_f32(const float * vx, const float * vy, float * dst, int ncols_x, int nrows_x, hipStream_t stream) {
+    kernel_mul_mat_vec_f32<<<nrows_x, 256, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x);
 }
 
 // RMSNorm: dst = rmsnorm(x) * weight

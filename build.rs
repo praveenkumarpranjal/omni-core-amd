@@ -6,6 +6,9 @@ fn main() {
     // HIP runtime
     println!("cargo:rustc-link-search=native=/opt/rocm/lib");
     println!("cargo:rustc-link-lib=dylib=amdhip64");
+    
+    // rocBLAS for GEMM operations
+    println!("cargo:rustc-link-lib=dylib=rocblas");
 
     // Our self-contained libraries
     println!("cargo:rustc-link-search=native={}", libs_dir);
@@ -16,4 +19,5 @@ fn main() {
 
     // Runtime library path  
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", libs_dir);
+    println!("cargo:rustc-link-arg=-Wl,-rpath,/opt/rocm/lib");
 }

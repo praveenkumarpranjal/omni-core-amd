@@ -9,8 +9,49 @@ pub enum HipError {
     OutOfMemory = 2,
     NotInitialized = 3,
     Deinitialized = 4,
+    ProfilerDisabled = 5,
+    ProfilerNotInitialized = 6,
+    ProfilerAlreadyStarted = 7,
+    ProfilerAlreadyStopped = 8,
     NoDevice = 100,
     InvalidDevice = 101,
+    InvalidImage = 200,
+    InvalidContext = 201,
+    ContextAlreadyCurrent = 202,
+    MapFailed = 205,
+    UnmapFailed = 206,
+    ArrayIsMapped = 207,
+    AlreadyMapped = 208,
+    NoBinaryForGpu = 209,
+    AlreadyAcquired = 210,
+    NotMapped = 211,
+    NotMappedAsArray = 212,
+    NotMappedAsPointer = 213,
+    ECCNotCorrectable = 214,
+    UnsupportedLimit = 215,
+    ContextAlreadyInUse = 216,
+    PeerAccessUnsupported = 217,
+    InvalidKernelFile = 300,
+    InvalidGraphicsContext = 301,
+    SharedObjectSymbolNotFound = 302,
+    SharedObjectInitFailed = 303,
+    OperatingSystemError = 304,
+    InvalidHandle = 400,
+    NotFound = 500,
+    NotReady = 600,
+    IllegalAddress = 700,
+    LaunchOutOfResources = 701,
+    LaunchTimeOut = 702,
+    PeerAccessAlreadyEnabled = 704,
+    PeerAccessNotEnabled = 705,
+    SetOnActiveProcess = 708,
+    ContextIsDestroyed = 709,
+    Assert = 710,
+    HostMemoryAlreadyRegistered = 712,
+    HostMemoryNotRegistered = 713,
+    LaunchFailure = 719,
+    CooperativeLaunchTooLarge = 720,
+    NotSupported = 801,
     Unknown = 999,
 }
 
@@ -94,8 +135,60 @@ extern "C" {
     ) -> HipError;
 }
 
+// rocBLAS types and functions for GEMM
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum RocblasOperation {
+    None = 111,      // No transpose
+    Transpose = 112, // Transpose
+    Conjugate = 113, // Conjugate transpose
+}
+
+type RocblasHandle = *mut c_void;
+type RocblasStatus = i32;
+
+extern "C" {
+    pub fn rocblas_create_handle(handle: *mut RocblasHandle) -> RocblasStatus;
+    pub fn rocblas_destroy_handle(handle: RocblasHandle) -> RocblasStatus;
+    pub fn rocblas_set_stream(handle: RocblasHandle, stream: *mut c_void) -> RocblasStatus;
+    
+    pub fn rocblas_sgemm(
+        handle: RocblasHandle,
+        transA: RocblasOperation,
+        transB: RocblasOperation,
+        m: c_int,
+        n: c_int,
+        k: c_int,
+        alpha: *const f32,
+        A: *const f32,
+        lda: c_int,
+        B: *const f32,
+        ldb: c_int,
+        beta: *const f32,
+        C: *mut f32,
+        ldc: c_int,
+    ) -> RocblasStatus;
+}
+
+/// Global rocBLAS handle (initialized once)
+static mut ROCBLAS_HANDLE: Option<RocblasHandle> = None;
+
+pub fn get_rocblas_handle() -> Result<RocblasHandle> {
+    unsafe {
+        if ROCBLAS_HANDLE.is_none() {
+            let mut handle: RocblasHandle = std::ptr::null_mut();
+            let status = rocblas_create_handle(&mut handle);
+            if status != 0 {
+                bail!("rocblas_create_handle failed with status: {}", status);
+            }
+            ROCBLAS_HANDLE = Some(handle);
+        }
+        Ok(ROCBLAS_HANDLE.unwrap())
+    }
+}
+
 /// Copy device memory to device memory
-pub fn hipMemcpyDtoD(dst: *mut c_void, src: *const c_void, size: usize) {
+pub fn hip_memcpy_dto_d(dst: *mut c_void, src: *const c_void, size: usize) {
     unsafe {
         hipMemcpy(dst, src, size, HipMemcpyKind::DeviceToDevice);
     }
@@ -164,7 +257,45 @@ impl HipFunction {
             std::ptr::null_mut(),
         );
         if err != HipError::Success {
-            bail!("hipModuleLaunchKernel failed with error: {:?}", err);
+            // Get additional error info
+            let last_err = hipGetLastError();
+            bail!(
+                "hipModuleLaunchKernel failed: {:?} (last error: {:?})\n\
+                 Grid: ({}, {}, {}), Block: ({}, {}, {}), Params: {} args",
+                err, last_err,
+                grid.0, grid.1, grid.2,
+                block.0, block.1, block.2,
+                params.len()
+            );
+        }
+        Ok(())
+    }
+    
+    pub unsafe fn launch_with_shared(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        shared_mem_bytes: u32,
+        params: &[*mut c_void],
+    ) -> Result<()> {
+        let err = hipModuleLaunchKernel(
+            self.function,
+            grid.0, grid.1, grid.2,
+            block.0, block.1, block.2,
+            shared_mem_bytes, std::ptr::null_mut(),
+            params.as_ptr() as *mut *mut c_void,
+            std::ptr::null_mut(),
+        );
+        if err != HipError::Success {
+            let last_err = hipGetLastError();
+            bail!(
+                "hipModuleLaunchKernel failed: {:?} (last error: {:?})\n\
+                 Grid: ({}, {}, {}), Block: ({}, {}, {}), Shared: {} bytes, Params: {} args",
+                err, last_err,
+                grid.0, grid.1, grid.2,
+                block.0, block.1, block.2,
+                shared_mem_bytes, params.len()
+            );
         }
         Ok(())
     }
@@ -235,6 +366,6 @@ pub fn init_gpu() -> Result<()> {
     if err != HipError::Success {
         bail!("hipSetDevice(0) failed: {:?}", err);
     }
-    println!("GPU initialized: found {} device(s)", count);
+    // println!("GPU initialized: found {} device(s)", count);
     Ok(())
 }
