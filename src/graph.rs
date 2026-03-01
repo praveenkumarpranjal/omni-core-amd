@@ -149,6 +149,7 @@ pub struct WorkspaceBuffers {
     pub token_q8: DevicePtr,
     pub attn_q8: DevicePtr,
     pub ffn_q8: DevicePtr,
+    pub logits_f32_buf: Option<DevicePtr>,
 }
 
 impl LlamaGraph {
@@ -385,6 +386,12 @@ impl LlamaGraph {
         // Allocate all workspace buffers once
         let max_q8_size = ffn_dim.max(d_model).max(n_head * head_dim);
         
+        let logits_f32_buf = if cfg.output_type == GGML_TYPE_F16 || cfg.emb_type == GGML_TYPE_F16 {
+            Some(DevicePtr::alloc(cfg.vocab_size * d_model * 4)?)
+        } else {
+            None
+        };
+        
         self.workspace = Some(WorkspaceBuffers {
             normed: DevicePtr::alloc(d_model * 4)?,
             q_proj: DevicePtr::alloc(n_head * head_dim * 4)?,
@@ -400,6 +407,7 @@ impl LlamaGraph {
             token_q8: DevicePtr::alloc((max_q8_size / 32) * 36)?,
             attn_q8: DevicePtr::alloc((max_q8_size / 32) * 36)?,
             ffn_q8: DevicePtr::alloc((max_q8_size / 32) * 36)?,
+            logits_f32_buf,
         });
         
         Ok(())
@@ -749,11 +757,12 @@ impl LlamaGraph {
             unsafe {
                 if out_type == GGML_TYPE_F16 || out_type == GGML_TYPE_F32 {
                     let mut head_ptr = lm_head.as_ptr() as *const f32;
-                    let f32_buf;
                     if out_type == GGML_TYPE_F16 {
-                        f32_buf = DevicePtr::alloc(vocab_size * d_model * 4)?;
-                        bridge_f16_to_f32(lm_head.as_ptr(), f32_buf.as_ptr() as *mut f32, (vocab_size * d_model) as i32, s);
-                        head_ptr = f32_buf.as_ptr() as *const f32;
+                        // Reuse the pre-allocated logits_f32_buf
+                        if let Some(ref f32_buf) = ws.logits_f32_buf {
+                            bridge_f16_to_f32(lm_head.as_ptr(), f32_buf.as_ptr() as *mut f32, (vocab_size * d_model) as i32, s);
+                            head_ptr = f32_buf.as_ptr() as *const f32;
+                        }
                     }
                     bridge_mul_mat_vec_f32(head_ptr, normed.as_ptr() as *const f32, 
                         logits_gpu.as_ptr() as *mut f32, d_model as i32, vocab_size as i32, s);
@@ -772,11 +781,11 @@ impl LlamaGraph {
             unsafe {
                 if out_type == GGML_TYPE_F16 || out_type == GGML_TYPE_F32 {
                     let mut head_ptr = tied_weight.as_ptr() as *const f32;
-                    let f32_buf;
                     if out_type == GGML_TYPE_F16 {
-                        f32_buf = DevicePtr::alloc(vocab_size * d_model * 4)?;
-                        bridge_f16_to_f32(tied_weight.as_ptr(), f32_buf.as_ptr() as *mut f32, (vocab_size * d_model) as i32, s);
-                        head_ptr = f32_buf.as_ptr() as *const f32;
+                        if let Some(ref f32_buf) = ws.logits_f32_buf {
+                            bridge_f16_to_f32(tied_weight.as_ptr(), f32_buf.as_ptr() as *mut f32, (vocab_size * d_model) as i32, s);
+                            head_ptr = f32_buf.as_ptr() as *const f32;
+                        }
                     }
                     bridge_mul_mat_vec_f32(head_ptr, normed.as_ptr() as *const f32, 
                         logits_gpu.as_ptr() as *mut f32, d_model as i32, vocab_size as i32, s);
