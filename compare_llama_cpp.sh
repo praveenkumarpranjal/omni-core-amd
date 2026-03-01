@@ -10,7 +10,7 @@ echo ""
 
 echo "Testing Omni-Core (optimized)..."
 omni_output=$(./target/release/omni-core -m "$MODEL" -p "$PROMPT" -n $TOKENS -t 0.0 2>&1)
-omni_prefill=$(echo "$omni_output" | grep "Prefill:" | awk '{print $7}')
+omni_prefill=$(echo "$omni_output" | grep "Prefill:" | sed -n 's/.*= \(.*\) tok\/s.*/\1/p' | awk '{print $1}')
 omni_gen=$(echo "$omni_output" | grep "Performance:" | awk '{print $2}')
 
 echo "  Prefill: $omni_prefill tok/s"
@@ -18,9 +18,28 @@ echo "  Generation: $omni_gen tok/s"
 echo ""
 
 echo "Testing llama.cpp..."
-timeout 15s ../llama.cpp/build/bin/llama-cli -m "$MODEL" -p "$PROMPT" -n $TOKENS --temp 0.0 -ngl 99 2>&1 > /tmp/llama_output.txt
-llama_prefill=$(grep "Prompt:" /tmp/llama_output.txt | awk '{print $2}')
-llama_gen=$(grep "Generation:" /tmp/llama_output.txt | awk '{print $2}')
+cat > /tmp/parse_llama.py << 'EOF'
+import sys
+import pexpect
+
+model = sys.argv[1]
+prompt = sys.argv[2]
+tokens = sys.argv[3]
+
+child = pexpect.spawn(f'../llama.cpp/build/bin/llama-cli -m {model} -p "{prompt}" -n {tokens} --temp 0.0 -ngl 99', encoding='utf-8')
+try:
+    child.expect(r'\[ Prompt: ([\d.]+) t/s \| Generation: ([\d.]+) t/s \]', timeout=15)
+    print(f"{child.match.group(1)}")
+    print(f"{child.match.group(2)}")
+except:
+    print("0.0\n0.0")
+finally:
+    child.terminate(force=True)
+EOF
+
+llama_metrics=$(python3 /tmp/parse_llama.py "$MODEL" "$PROMPT" "$TOKENS")
+llama_prefill=$(echo "$llama_metrics" | head -n 1)
+llama_gen=$(echo "$llama_metrics" | tail -n 1)
 
 echo "  Prefill: $llama_prefill tok/s"
 echo "  Generation: $llama_gen tok/s"

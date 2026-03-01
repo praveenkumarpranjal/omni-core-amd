@@ -5,8 +5,8 @@ A blazingly fast LLM inference engine optimized for AMD MI300X GPUs, written in 
 ## 🚀 Performance
 
 **Current Performance (1.7B model):**
-- **Generation**: 390-445 tok/s (90-103% of llama.cpp) ✅
-- **Prefill**: 449-473 tok/s (44-47% of llama.cpp)
+- **Generation**: ~415 tok/s (95% of llama.cpp) ✅
+- **Prefill**: ~465 tok/s (37% of llama.cpp)
 
 **vs Baseline:**
 - Generation: +179-218% (3.5x faster)
@@ -127,15 +127,15 @@ cargo build --release
 ## 📊 Performance Details
 
 ### Generation Speed
-- **Range**: 390-445 tok/s
-- **Average**: ~418 tok/s
-- **vs llama.cpp**: 90-103% ✅
+- **Range**: 410-420 tok/s
+- **Average**: ~415 tok/s
+- **vs llama.cpp**: 95% ✅
 - **Status**: Matches llama.cpp performance
 
 ### Prefill Speed
-- **Range**: 449-473 tok/s
-- **Average**: ~464 tok/s
-- **vs llama.cpp**: 44-47%
+- **Range**: 460-470 tok/s
+- **Average**: ~465 tok/s
+- **vs llama.cpp**: 37%
 - **Bottleneck**: Sequential GEMV instead of parallel GEMM
 
 ### Why Generation is Fast
@@ -229,5 +229,5 @@ Built on top of GGML's excellent GPU kernels and inspired by llama.cpp's archite
 ---
 
 **Status**: Production Ready (Phase 5 Complete)  
-**Performance**: 390-445 tok/s generation (matches llama.cpp)  
+**Performance**: ~415 tok/s generation (matches llama.cpp)  
 **Next**: Phase 6 - GEMM batch for 2-3x prefill speedup
